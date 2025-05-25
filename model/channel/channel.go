@@ -135,10 +135,10 @@ func (c *Channel[T]) ReceiveDiscardOk() T {
 func (c *Channel[T]) BufferedTryReceiveLocked() (bool, T, bool) {
 	var v T
 	if c.count > 0 {
-		v = c.buffer[c.first]
+		c.v = c.buffer[c.first]
 		c.first = (c.first + 1) % uint64(len(c.buffer))
 		c.count -= 1
-		return true, v, true
+		return true, c.v, true
 	}
 	if c.state == closed {
 		return true, v, false
