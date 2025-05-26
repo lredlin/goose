@@ -153,35 +153,6 @@ func (c *Channel[T]) BufferedTryReceive() (bool, T, bool) {
 	return selected, return_val, ok
 }
 
-type ReceiverState uint64
-
-const (
-	ReceiverCompletedWithSender ReceiverState = 0 // Receiver found a waiting sender
-	ReceiverMadeOffer           ReceiverState = 1 // Receiver made an offer (no sender waiting)
-	ReceiverObservedClosed      ReceiverState = 2 // Receiver saw that the channel was closed
-	ReceiverCannotProceed       ReceiverState = 3 // Invalid state for receiving
-)
-
-func (c *Channel[T]) ReceiverCompleteOrOffer() ReceiverState {
-	// A receiver is waiting, complete exchange
-	if c.state == sender_ready {
-		c.state = receiver_done
-		return ReceiverCompletedWithSender
-	}
-	// No exchange in progress, make an offer, which will "lock" the channel from other
-	// receivers since they will do nothing in this function if receiver_ready is observed.
-	if c.state == start {
-		c.state = receiver_ready
-		return ReceiverMadeOffer
-	}
-	// Closed, we will return ok=false.
-	if c.state == closed {
-		return ReceiverObservedClosed
-	}
-	// An exchange is in progress, don't select.
-	return ReceiverCannotProceed
-}
-
 type OfferResult uint64
 
 const (
@@ -190,52 +161,53 @@ const (
 	CloseInterruptedOffer OfferResult = 2 // Unexpected state, indicates model bugs.
 )
 
-func (c *Channel[T]) ReceiverCompleteOrRescindOffer() OfferResult {
-	// Offer cancelled by close
-	if c.state == closed {
-		return CloseInterruptedOffer
-	}
-	// Offer wasn't accepted in time, rescind it.
-	if c.state == receiver_ready {
-		c.state = start
-		return OfferRescinded
-	}
-	// Offer was accepted, complete the exchange.
-	if c.state == sender_done {
-		c.state = start
-		return CompletedExchange
-	}
-	panic("Invalid state transition with open receive offer")
-}
-
 func (c *Channel[T]) UnbufferedTryReceive() (bool, T, bool) {
 	var local_val T
 	// First critical section: determine state and get value if sender is ready
 	c.lock.Lock()
-	try_select := c.ReceiverCompleteOrOffer()
-	// Are we closed?
-	var ok bool = !(try_select == ReceiverObservedClosed)
-	// Closed and other party ready are selectable
-	var selected bool = (try_select == ReceiverCompletedWithSender || !ok)
-	if selected {
-		// Save the value
-		local_val = c.v
-	}
-	c.lock.Unlock()
-
-	// If we offered, see if it was accepted
-	if try_select == ReceiverMadeOffer {
-		c.lock.Lock()
-		offer_result := c.ReceiverCompleteOrRescindOffer()
-		if offer_result == CompletedExchange {
-			// Save and select if we managed to bait a sender.
-			local_val = c.v
-			selected = true
-		}
+	// No exchange in progress, make an offer, which will "lock" the channel from other
+	// receivers since they will do nothing in this function if receiver_ready is observed.
+	if c.state == closed {
 		c.lock.Unlock()
+		return true, local_val, false
 	}
-
-	return selected, local_val, ok
+	if c.state == sender_ready {
+		local_val = c.v
+		c.state = receiver_done
+		c.lock.Unlock()
+		return true, local_val, true
+	}
+	if c.state == sender_done || c.state == receiver_ready || c.state == receiver_done {
+		c.lock.Unlock()
+		return false, local_val, true
+	}
+	if c.state == start {
+		c.state = receiver_ready
+		c.lock.Unlock()
+		c.lock.Lock()
+		if c.state == closed {
+			c.lock.Unlock()
+			return true, local_val, false
+		}
+		// Offer wasn't accepted in time, rescind it.
+		if c.state == receiver_ready {
+			c.state = start
+			c.lock.Unlock()
+			return false, local_val, true
+		}
+		// Offer was accepted, complete the exchange.
+		if c.state == sender_done {
+			c.state = start
+			local_val = c.v
+			c.lock.Unlock()
+			return true, local_val, true
+		}
+		// Cases should be exhaustive which is non-obvious here, since close can rescind the offer
+		// for us but other receivers cannot.
+		panic("not supposed to be here!")
+	}
+	// We should be exhaustively handling these cases but Go wants a return everywhere
+	panic("not supposed to be here!")
 }
 
 // Non-blocking receive function used for select statements. Blocking receive is modeled as
