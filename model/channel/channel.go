@@ -437,20 +437,16 @@ func Select2[T1, T2 any](
 	blocking bool) uint64 {
 
 	i := primitive.RandomUint64() % uint64(2)
-	var selected bool
-	selected = TrySelectCase2(i, case1, case2)
-	if selected {
+	if TrySelectCase2(i, case1, case2) {
 		return i
 	}
 
 	// If nothing was selected and we're blocking, try in a loop
 	for {
-		selected = TrySelect(case1)
-		if selected {
+		if TrySelect(case1) {
 			return 0
 		}
-		selected = TrySelect(case2)
-		if selected {
+		if TrySelect(case2) {
 			return 1
 		}
 		if !blocking {
@@ -483,23 +479,18 @@ func Select3[T1, T2, T3 any](
 	blocking bool) uint64 {
 
 	i := primitive.RandomUint64() % uint64(3)
-	var selected bool
-	selected = TrySelectCase3(i, case1, case2, case3)
-	if selected {
+	if TrySelectCase3(i, case1, case2, case3) {
 		return i
 	}
 
 	for {
-		selected = TrySelect(case1)
-		if selected {
+		if TrySelect(case1) {
 			return 0
 		}
-		selected = TrySelect(case2)
-		if selected {
+		if TrySelect(case2) {
 			return 1
 		}
-		selected = TrySelect(case3)
-		if selected {
+		if TrySelect(case3) {
 			return 2
 		}
 		if !blocking {
@@ -537,27 +528,21 @@ func Select4[T1, T2, T3, T4 any](
 	blocking bool) uint64 {
 
 	i := primitive.RandomUint64() % uint64(4)
-	var selected bool
-	selected = TrySelectCase4(i, case1, case2, case3, case4)
-	if selected {
+	if TrySelectCase4(i, case1, case2, case3, case4) {
 		return i
 	}
 
 	for {
-		selected = TrySelect(case1)
-		if selected {
+		if TrySelect(case1) {
 			return 0
 		}
-		selected = TrySelect(case2)
-		if selected {
+		if TrySelect(case2) {
 			return 1
 		}
-		selected = TrySelect(case3)
-		if selected {
+		if TrySelect(case3) {
 			return 2
 		}
-		selected = TrySelect(case4)
-		if selected {
+		if TrySelect(case4) {
 			return 3
 		}
 		if !blocking {
@@ -600,31 +585,24 @@ func Select5[T1, T2, T3, T4, T5 any](
 	blocking bool) uint64 {
 
 	i := primitive.RandomUint64() % uint64(5)
-	var selected bool
-	selected = TrySelectCase5(i, case1, case2, case3, case4, case5)
-	if selected {
+	if TrySelectCase5(i, case1, case2, case3, case4, case5) {
 		return i
 	}
 
 	for {
-		selected = TrySelect(case1)
-		if selected {
+		if TrySelect(case1) {
 			return 0
 		}
-		selected = TrySelect(case2)
-		if selected {
+		if TrySelect(case2) {
 			return 1
 		}
-		selected = TrySelect(case3)
-		if selected {
+		if TrySelect(case3) {
 			return 2
 		}
-		selected = TrySelect(case4)
-		if selected {
+		if TrySelect(case4) {
 			return 3
 		}
-		selected = TrySelect(case5)
-		if selected {
+		if TrySelect(case5) {
 			return 4
 		}
 		if !blocking {
