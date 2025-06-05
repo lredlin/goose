@@ -182,3 +182,48 @@ func CoordinatedChannelClose() {
 		panic("Did not receive both expected values")
 	}
 }
+
+// Example 6: A basic pipeline that just passes pointers
+// to a single worker who doubles the value of what they
+// point to.
+func DoubleValues() {
+	var val1 uint64 = 5
+	var val2 uint64 = 10
+	var val3 uint64 = 15
+
+	var values []*uint64
+	values = append(values, &val1)
+	values = append(values, &val2)
+	values = append(values, &val3)
+
+	// Create an unbuffered channel for processing
+	ch := channel.NewChannelRef[*uint64](0)
+	done := channel.NewChannelRef[uint64](0)
+
+	// Start a worker goroutine
+	go func() {
+		// Process each pointer using range
+		for true {
+			ptr, ok := ch.Receive()
+			if !ok {
+				break
+			}
+			*ptr = *ptr * 2
+		}
+		done.Close()
+	}()
+
+	// Send pointers to the goroutine for processing
+	ch.Send(values[0])
+	ch.Send(values[1])
+	ch.Send(values[2])
+
+	// Close the channel
+	ch.Close()
+	done.Receive()
+
+	// Check if values were doubled correctly
+	if !(val1 == 10 && val2 == 20 && val3 == 30) {
+		panic("Values were not doubled correctly")
+	}
+}
