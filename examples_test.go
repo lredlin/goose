@@ -274,6 +274,7 @@ func TestAllChannelTests(t *testing.T) {
 	chan_spec_raw_examples.JoinWithSend()
 	chan_spec_raw_examples.BroadcastNotification()
 	chan_spec_raw_examples.CoordinatedChannelClose()
+	chan_spec_raw_examples.DoubleValues()
 	// If we get here, none of the functions panicked
 	t.Log("All channel tests passed successfully!")
 }
