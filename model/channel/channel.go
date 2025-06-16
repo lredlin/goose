@@ -3,7 +3,7 @@ package channel
 import (
 	"sync"
 
-	"github.com/goose-lang/std/std_core"
+	"github.com/goose-lang/primitive"
 )
 
 type ChannelState uint64
@@ -61,6 +61,7 @@ func (c *Channel[T]) Send(val T) {
 	// Run a blocking select with just this one case
 	// This will block until the send succeeds
 	Select1(sendCase, true)
+	return
 }
 
 // Equivalent to:
@@ -134,10 +135,10 @@ func (c *Channel[T]) ReceiveDiscardOk() T {
 func (c *Channel[T]) BufferedTryReceiveLocked() (bool, T, bool) {
 	var v T
 	if c.count > 0 {
-		v = c.buffer[c.first]
+		c.v = c.buffer[c.first]
 		c.first = (c.first + 1) % uint64(len(c.buffer))
 		c.count -= 1
-		return true, v, true
+		return true, c.v, true
 	}
 	if c.state == closed {
 		return true, v, false
@@ -152,35 +153,6 @@ func (c *Channel[T]) BufferedTryReceive() (bool, T, bool) {
 	return selected, return_val, ok
 }
 
-type ReceiverState uint64
-
-const (
-	ReceiverCompletedWithSender ReceiverState = 0 // Receiver found a waiting sender
-	ReceiverMadeOffer           ReceiverState = 1 // Receiver made an offer (no sender waiting)
-	ReceiverObservedClosed      ReceiverState = 2 // Receiver saw that the channel was closed
-	ReceiverCannotProceed       ReceiverState = 3 // Invalid state for receiving
-)
-
-func (c *Channel[T]) ReceiverCompleteOrOffer() ReceiverState {
-	// A receiver is waiting, complete exchange
-	if c.state == sender_ready {
-		c.state = receiver_done
-		return ReceiverCompletedWithSender
-	}
-	// No exchange in progress, make an offer, which will "lock" the channel from other
-	// receivers since they will do nothing in this function if receiver_ready is observed.
-	if c.state == start {
-		c.state = receiver_ready
-		return ReceiverMadeOffer
-	}
-	// Closed, we will return ok=false.
-	if c.state == closed {
-		return ReceiverObservedClosed
-	}
-	// An exchange is in progress, don't select.
-	return ReceiverCannotProceed
-}
-
 type OfferResult uint64
 
 const (
@@ -189,52 +161,53 @@ const (
 	CloseInterruptedOffer OfferResult = 2 // Unexpected state, indicates model bugs.
 )
 
-func (c *Channel[T]) ReceiverCompleteOrRescindOffer() OfferResult {
-	// Offer cancelled by close
-	if c.state == closed {
-		return CloseInterruptedOffer
-	}
-	// Offer wasn't accepted in time, rescind it.
-	if c.state == receiver_ready {
-		c.state = start
-		return OfferRescinded
-	}
-	// Offer was accepted, complete the exchange.
-	if c.state == sender_done {
-		c.state = start
-		return CompletedExchange
-	}
-	panic("Invalid state transition with open receive offer")
-}
-
 func (c *Channel[T]) UnbufferedTryReceive() (bool, T, bool) {
 	var local_val T
 	// First critical section: determine state and get value if sender is ready
 	c.lock.Lock()
-	try_select := c.ReceiverCompleteOrOffer()
-	// Are we closed?
-	var ok bool = !(try_select == ReceiverObservedClosed)
-	// Closed and other party ready are selectable
-	var selected bool = (try_select == ReceiverCompletedWithSender || !ok)
-	if selected {
-		// Save the value
-		local_val = c.v
-	}
-	c.lock.Unlock()
-
-	// If we offered, see if it was accepted
-	if try_select == ReceiverMadeOffer {
-		c.lock.Lock()
-		offer_result := c.ReceiverCompleteOrRescindOffer()
-		if offer_result == CompletedExchange {
-			// Save and select if we managed to bait a sender.
-			local_val = c.v
-			selected = true
-		}
+	// No exchange in progress, make an offer, which will "lock" the channel from other
+	// receivers since they will do nothing in this function if receiver_ready is observed.
+	if c.state == closed {
 		c.lock.Unlock()
+		return true, local_val, false
 	}
-
-	return selected, local_val, ok
+	if c.state == sender_ready {
+		local_val = c.v
+		c.state = receiver_done
+		c.lock.Unlock()
+		return true, local_val, true
+	}
+	if c.state == sender_done || c.state == receiver_ready || c.state == receiver_done {
+		c.lock.Unlock()
+		return false, local_val, true
+	}
+	if c.state == start {
+		c.state = receiver_ready
+		c.lock.Unlock()
+		c.lock.Lock()
+		if c.state == closed {
+			c.lock.Unlock()
+			return true, local_val, false
+		}
+		// Offer wasn't accepted in time, rescind it.
+		if c.state == receiver_ready {
+			c.state = start
+			c.lock.Unlock()
+			return false, local_val, true
+		}
+		// Offer was accepted, complete the exchange.
+		if c.state == sender_done {
+			c.state = start
+			local_val = c.v
+			c.lock.Unlock()
+			return true, local_val, true
+		}
+		// Cases should be exhaustive which is non-obvious here, since close can rescind the offer
+		// for us but other receivers cannot.
+		panic("not supposed to be here!")
+	}
+	// We should be exhaustively handling these cases but Go wants a return everywhere
+	panic("not supposed to be here!")
 }
 
 // Non-blocking receive function used for select statements. Blocking receive is modeled as
@@ -388,204 +361,19 @@ type SelectCase[T any] struct {
 	Ok      bool
 }
 
-// TrySelectAt attempts to select a specific case
-func TrySelectAt[T any](selectCase *SelectCase[T]) bool {
-	// nil is not selectable
-	if selectCase.channel != nil {
-		return TrySelect(selectCase)
+func NewSendCase[T any](channel *Channel[T], value T) *SelectCase[T] {
+	return &SelectCase[T]{
+		channel: channel,
+		dir:     SelectSend,
+		Value:   value,
 	}
-	return false
 }
 
-// TrySelectCase attempts to select a specific case at a given index
-// Returns true if the case was selected, false otherwise
-func TrySelectCase[T1, T2, T3, T4, T5 any](
-	index uint64,
-	case1 *SelectCase[T1],
-	case2 *SelectCase[T2],
-	case3 *SelectCase[T3],
-	case4 *SelectCase[T4],
-	case5 *SelectCase[T5]) bool {
-
-	if index == 0 {
-		return TrySelectAt(case1)
+func NewRecvCase[T any](channel *Channel[T]) *SelectCase[T] {
+	return &SelectCase[T]{
+		channel: channel,
+		dir:     SelectRecv,
 	}
-	if index == 1 {
-		return TrySelectAt(case2)
-	}
-	if index == 2 {
-		return TrySelectAt(case3)
-	}
-	if index == 3 {
-		return TrySelectAt(case4)
-	}
-	if index == 4 {
-		return TrySelectAt(case5)
-	}
-	return false
-}
-
-// I want a value for representing the default case but I can't use -1 with uint64
-// and I don't want this to be confused for a bug, so doing this.
-const (
-	DefaultCase uint64 = 5 // The value representing the default case
-)
-
-// TryCasesInOrder attempts to select one of the cases in the given order
-// Returns the index of the selected case, or 5 if none was selected.
-// I would probably return a sentinel value of 1 here but we are limited to
-// uint64 and the index after the last makes sense since that would be where the
-// default block is.
-func TryCasesInOrder[T1, T2, T3, T4, T5 any](
-	order []uint64,
-	case1 *SelectCase[T1],
-	case2 *SelectCase[T2],
-	case3 *SelectCase[T3],
-	case4 *SelectCase[T4],
-	case5 *SelectCase[T5]) uint64 {
-	var select_case uint64 = uint64(len(order))
-	for _, i := range order {
-		if select_case == uint64(len(order)) && TrySelectCase(i, case1, case2, case3, case4, case5) {
-			select_case = uint64(i)
-		}
-	}
-	return select_case
-}
-
-// MultiSelect performs a select operation on up to 5 cases.
-// This is the largest number of cases the model will support, at least for now.
-// Because of the fact that nil channels are not selectable, we can simply make
-// this function never select a case with a nil channel and take advantage of
-// this behavior to model selects with fewer than 5 statements by simply passing
-// in "empty cases" that have a nil channel. This will allow verifying only the
-// 5 statement case with a thin wrapper for the smaller ones.
-//
-// Cases with nil channels are ignored.
-// This function returns the index of the selected case.
-// If blocking is true, keep trying to select until a select succeeds.
-// If blocking is false, return 5. 5 is the equivalent of a default case
-// in Go channels.
-func multiSelect[T1, T2, T3, T4, T5 any](
-	case1 *SelectCase[T1],
-	case2 *SelectCase[T2],
-	case3 *SelectCase[T3],
-	case4 *SelectCase[T4],
-	case5 *SelectCase[T5],
-	blocking bool) uint64 {
-
-	var selected_case uint64 = DefaultCase
-
-	// Get a random order for fairness (only once, outside the loop)
-	order := std_core.Permutation(5)
-
-	// If nothing was selected and we're blocking, try in a loop
-	for {
-		selected_case = TryCasesInOrder(order, case1, case2, case3, case4, case5)
-		if selected_case != DefaultCase || !blocking {
-			break
-		}
-	}
-	return selected_case
-}
-
-// Select1 performs a select operation on 1 case. This is used for Send and
-// Receive as well, since these channel operations in Go are equivalent to
-// a single case select statement with no default.
-func Select1[T1 any](
-	case1 *SelectCase[T1],
-	blocking bool) uint64 {
-
-	// Create empty cases with nil channels for the unused slots
-	emptyCase2 := &SelectCase[uint64]{channel: nil}
-	emptyCase3 := &SelectCase[uint64]{channel: nil}
-	emptyCase4 := &SelectCase[uint64]{channel: nil}
-	emptyCase5 := &SelectCase[uint64]{channel: nil}
-
-	return multiSelect(
-		case1,
-		emptyCase2,
-		emptyCase3,
-		emptyCase4,
-		emptyCase5,
-		blocking)
-}
-
-// Select2 performs a select operation on 2 cases.
-func Select2[T1, T2 any](
-	case1 *SelectCase[T1],
-	case2 *SelectCase[T2],
-	blocking bool) uint64 {
-
-	// Create empty cases with nil channels for the unused slots
-	emptyCase3 := &SelectCase[uint64]{}
-	emptyCase4 := &SelectCase[uint64]{}
-	emptyCase5 := &SelectCase[uint64]{}
-
-	return multiSelect(
-		case1,
-		case2,
-		emptyCase3,
-		emptyCase4,
-		emptyCase5,
-		blocking)
-}
-
-// Select3 performs a select operation on 3 cases.
-func Select3[T1, T2, T3 any](
-	case1 *SelectCase[T1],
-	case2 *SelectCase[T2],
-	case3 *SelectCase[T3],
-	blocking bool) uint64 {
-
-	// Create empty cases with nil channels for the unused slots
-	emptyCase4 := &SelectCase[uint64]{}
-	emptyCase5 := &SelectCase[uint64]{}
-
-	return multiSelect(
-		case1,
-		case2,
-		case3,
-		emptyCase4,
-		emptyCase5,
-		blocking)
-}
-
-// Select4 performs a select operation on 4 cases.
-func Select4[T1, T2, T3, T4 any](
-	case1 *SelectCase[T1],
-	case2 *SelectCase[T2],
-	case3 *SelectCase[T3],
-	case4 *SelectCase[T4],
-	blocking bool) uint64 {
-
-	// Create an empty case with nil channel for the unused slot
-	emptyCase5 := &SelectCase[uint64]{}
-
-	return multiSelect(
-		case1,
-		case2,
-		case3,
-		case4,
-		emptyCase5,
-		blocking)
-}
-
-// Select5 is just an alias to MultiSelect for consistency in the API.
-func Select5[T1, T2, T3, T4, T5 any](
-	case1 *SelectCase[T1],
-	case2 *SelectCase[T2],
-	case3 *SelectCase[T3],
-	case4 *SelectCase[T4],
-	case5 *SelectCase[T5],
-	blocking bool) uint64 {
-
-	return multiSelect(
-		case1,
-		case2,
-		case3,
-		case4,
-		case5,
-		blocking)
 }
 
 // Uses the applicable Try<Operation> function on the select case's channel. Default is always
@@ -614,17 +402,211 @@ func TrySelect[T any](select_case *SelectCase[T]) bool {
 	return false
 }
 
-func NewSendCase[T any](channel *Channel[T], value T) *SelectCase[T] {
-	return &SelectCase[T]{
-		channel: channel,
-		dir:     SelectSend,
-		Value:   value,
+// Select1 performs a select operation on 1 case. This is used for Send and
+// Receive as well, since these channel operations in Go are equivalent to
+// a single case select statement with no default.
+func Select1[T1 any](
+	case1 *SelectCase[T1],
+	blocking bool) bool {
+	var selected bool
+	for {
+		selected = TrySelect(case1)
+		if selected || !blocking {
+			break
+		}
+	}
+	return selected
+}
+
+func TrySelectCase2[T1, T2 any](
+	index uint64,
+	case1 *SelectCase[T1],
+	case2 *SelectCase[T2]) bool {
+	if index == 0 {
+		return TrySelect(case1)
+	}
+	if index == 1 {
+		return TrySelect(case2)
+	}
+	panic("index needs to be 0 or 1")
+}
+
+func Select2[T1, T2 any](
+	case1 *SelectCase[T1],
+	case2 *SelectCase[T2],
+	blocking bool) uint64 {
+
+	i := primitive.RandomUint64() % uint64(2)
+	if TrySelectCase2(i, case1, case2) {
+		return i
+	}
+
+	// If nothing was selected and we're blocking, try in a loop
+	for {
+		if TrySelect(case1) {
+			return 0
+		}
+		if TrySelect(case2) {
+			return 1
+		}
+		if !blocking {
+			return 2
+		}
 	}
 }
 
-func NewRecvCase[T any](channel *Channel[T]) *SelectCase[T] {
-	return &SelectCase[T]{
-		channel: channel,
-		dir:     SelectRecv,
+func TrySelectCase3[T1, T2, T3 any](
+	index uint64,
+	case1 *SelectCase[T1],
+	case2 *SelectCase[T2],
+	case3 *SelectCase[T3]) bool {
+	if index == 0 {
+		return TrySelect(case1)
+	}
+	if index == 1 {
+		return TrySelect(case2)
+	}
+	if index == 2 {
+		return TrySelect(case3)
+	}
+	panic("index needs to be 0, 1 or 2")
+}
+
+func Select3[T1, T2, T3 any](
+	case1 *SelectCase[T1],
+	case2 *SelectCase[T2],
+	case3 *SelectCase[T3],
+	blocking bool) uint64 {
+
+	i := primitive.RandomUint64() % uint64(3)
+	if TrySelectCase3(i, case1, case2, case3) {
+		return i
+	}
+
+	for {
+		if TrySelect(case1) {
+			return 0
+		}
+		if TrySelect(case2) {
+			return 1
+		}
+		if TrySelect(case3) {
+			return 2
+		}
+		if !blocking {
+			return 3
+		}
+	}
+}
+
+func TrySelectCase4[T1, T2, T3, T4 any](
+	index uint64,
+	case1 *SelectCase[T1],
+	case2 *SelectCase[T2],
+	case3 *SelectCase[T3],
+	case4 *SelectCase[T4]) bool {
+	if index == 0 {
+		return TrySelect(case1)
+	}
+	if index == 1 {
+		return TrySelect(case2)
+	}
+	if index == 2 {
+		return TrySelect(case3)
+	}
+	if index == 3 {
+		return TrySelect(case4)
+	}
+	panic("index needs to be 0, 1, 2 or 3")
+}
+
+func Select4[T1, T2, T3, T4 any](
+	case1 *SelectCase[T1],
+	case2 *SelectCase[T2],
+	case3 *SelectCase[T3],
+	case4 *SelectCase[T4],
+	blocking bool) uint64 {
+
+	i := primitive.RandomUint64() % uint64(4)
+	if TrySelectCase4(i, case1, case2, case3, case4) {
+		return i
+	}
+
+	for {
+		if TrySelect(case1) {
+			return 0
+		}
+		if TrySelect(case2) {
+			return 1
+		}
+		if TrySelect(case3) {
+			return 2
+		}
+		if TrySelect(case4) {
+			return 3
+		}
+		if !blocking {
+			return 4
+		}
+	}
+}
+
+func TrySelectCase5[T1, T2, T3, T4, T5 any](
+	index uint64,
+	case1 *SelectCase[T1],
+	case2 *SelectCase[T2],
+	case3 *SelectCase[T3],
+	case4 *SelectCase[T4],
+	case5 *SelectCase[T5]) bool {
+	if index == 0 {
+		return TrySelect(case1)
+	}
+	if index == 1 {
+		return TrySelect(case2)
+	}
+	if index == 2 {
+		return TrySelect(case3)
+	}
+	if index == 3 {
+		return TrySelect(case4)
+	}
+	if index == 4 {
+		return TrySelect(case5)
+	}
+	panic("index needs to be 0, 1, 2, 3 or 4")
+}
+
+func Select5[T1, T2, T3, T4, T5 any](
+	case1 *SelectCase[T1],
+	case2 *SelectCase[T2],
+	case3 *SelectCase[T3],
+	case4 *SelectCase[T4],
+	case5 *SelectCase[T5],
+	blocking bool) uint64 {
+
+	i := primitive.RandomUint64() % uint64(5)
+	if TrySelectCase5(i, case1, case2, case3, case4, case5) {
+		return i
+	}
+
+	for {
+		if TrySelect(case1) {
+			return 0
+		}
+		if TrySelect(case2) {
+			return 1
+		}
+		if TrySelect(case3) {
+			return 2
+		}
+		if TrySelect(case4) {
+			return 3
+		}
+		if TrySelect(case5) {
+			return 4
+		}
+		if !blocking {
+			return 5
+		}
 	}
 }
