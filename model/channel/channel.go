@@ -161,7 +161,7 @@ const (
 	CloseInterruptedOffer OfferResult = 2 // Unexpected state, indicates model bugs.
 )
 
-func (c *Channel[T]) UnbufferedTryReceive() (bool, T, bool) {
+func (c *Channel[T]) UnbufferedTryReceive(blocking bool) (bool, T, bool) {
 	var local_val T
 	// First critical section: determine state and get value if sender is ready
 	c.lock.Lock()
@@ -177,7 +177,7 @@ func (c *Channel[T]) UnbufferedTryReceive() (bool, T, bool) {
 		c.lock.Unlock()
 		return true, local_val, true
 	}
-	if c.state == sender_done || c.state == receiver_ready || c.state == receiver_done {
+	if c.state == sender_done || c.state == receiver_ready || c.state == receiver_done || !blocking {
 		c.lock.Unlock()
 		return false, local_val, true
 	}
@@ -212,11 +212,11 @@ func (c *Channel[T]) UnbufferedTryReceive() (bool, T, bool) {
 
 // Non-blocking receive function used for select statements. Blocking receive is modeled as
 // a single blocking select statement which amounts to a for loop until selected.
-func (c *Channel[T]) TryReceive() (bool, T, bool) {
+func (c *Channel[T]) TryReceive(blocking bool) (bool, T, bool) {
 	if uint64(len(c.buffer)) > 0 {
 		return c.BufferedTryReceive()
 	} else {
-		return c.UnbufferedTryReceive()
+		return c.UnbufferedTryReceive(blocking)
 	}
 }
 
@@ -228,7 +228,7 @@ const (
 	SenderCannotProceed         SenderState = 2 // Exchange in progress, don't select
 )
 
-func (c *Channel[T]) SenderCompleteOrOffer(val T) SenderState {
+func (c *Channel[T]) SenderCompleteOrOffer(val T, blocking bool) SenderState {
 	if c.state == closed {
 		panic("send on closed channel")
 	}
@@ -239,7 +239,8 @@ func (c *Channel[T]) SenderCompleteOrOffer(val T) SenderState {
 		return SenderCompletedWithReceiver
 	}
 	// No exchange in progress, make an offer.
-	if c.state == start {
+	// If we aren't blocking, don't make an offer, we aren't immediately selectable.
+	if c.state == start && blocking {
 		c.state = sender_ready
 		// Save the value in case the receiver completes the exchange.
 		c.v = val
@@ -284,7 +285,7 @@ func (c *Channel[T]) BufferedTrySend(val T) bool {
 
 // Non-Blocking send operation for select statements. Blocking send and blocking select
 // statements simply call this in a for loop until it returns true.
-func (c *Channel[T]) TrySend(val T) bool {
+func (c *Channel[T]) TrySend(val T, blocking bool) bool {
 	var buffer_size uint64 = uint64(len(c.buffer))
 
 	// Buffered channel:
@@ -298,7 +299,7 @@ func (c *Channel[T]) TrySend(val T) bool {
 	// Unbuffered channel:
 	// First critical section: Try to complete send or make offer
 	c.lock.Lock()
-	senderState := c.SenderCompleteOrOffer(val)
+	senderState := c.SenderCompleteOrOffer(val, blocking)
 	c.lock.Unlock()
 
 	// Second critical section: Handle offer case if needed
@@ -378,19 +379,19 @@ func NewRecvCase[T any](channel *Channel[T]) *SelectCase[T] {
 
 // Uses the applicable Try<Operation> function on the select case's channel. Default is always
 // selectable so simply returns true.
-func TrySelect[T any](select_case *SelectCase[T]) bool {
+func TrySelect[T any](select_case *SelectCase[T], blocking bool) bool {
 	var channel *Channel[T] = select_case.channel
 	if channel == nil {
 		return false
 	}
 	if select_case.dir == SelectSend {
-		return channel.TrySend(select_case.Value)
+		return channel.TrySend(select_case.Value, blocking)
 	}
 	if select_case.dir == SelectRecv {
 		var item T
 		var ok bool
 		var selected bool
-		selected, item, ok = channel.TryReceive()
+		selected, item, ok = channel.TryReceive(blocking)
 		// We can use these values for return by reference and they will be implicitly kept alive
 		// by the garbage collector so we can use value here for both the send and receive
 		// variants. What a miracle it is to not be using C++.
@@ -410,7 +411,7 @@ func Select1[T1 any](
 	blocking bool) bool {
 	var selected bool
 	for {
-		selected = TrySelect(case1)
+		selected = TrySelect(case1, blocking)
 		if selected || !blocking {
 			break
 		}
@@ -421,12 +422,12 @@ func Select1[T1 any](
 func TrySelectCase2[T1, T2 any](
 	index uint64,
 	case1 *SelectCase[T1],
-	case2 *SelectCase[T2]) bool {
+	case2 *SelectCase[T2], blocking bool) bool {
 	if index == 0 {
-		return TrySelect(case1)
+		return TrySelect(case1, blocking)
 	}
 	if index == 1 {
-		return TrySelect(case2)
+		return TrySelect(case2, blocking)
 	}
 	panic("index needs to be 0 or 1")
 }
@@ -437,16 +438,16 @@ func Select2[T1, T2 any](
 	blocking bool) uint64 {
 
 	i := primitive.RandomUint64() % uint64(2)
-	if TrySelectCase2(i, case1, case2) {
+	if TrySelectCase2(i, case1, case2, blocking) {
 		return i
 	}
 
 	// If nothing was selected and we're blocking, try in a loop
 	for {
-		if TrySelect(case1) {
+		if TrySelect(case1, blocking) {
 			return 0
 		}
-		if TrySelect(case2) {
+		if TrySelect(case2, blocking) {
 			return 1
 		}
 		if !blocking {
@@ -459,15 +460,15 @@ func TrySelectCase3[T1, T2, T3 any](
 	index uint64,
 	case1 *SelectCase[T1],
 	case2 *SelectCase[T2],
-	case3 *SelectCase[T3]) bool {
+	case3 *SelectCase[T3], blocking bool) bool {
 	if index == 0 {
-		return TrySelect(case1)
+		return TrySelect(case1, blocking)
 	}
 	if index == 1 {
-		return TrySelect(case2)
+		return TrySelect(case2, blocking)
 	}
 	if index == 2 {
-		return TrySelect(case3)
+		return TrySelect(case3, blocking)
 	}
 	panic("index needs to be 0, 1 or 2")
 }
@@ -479,18 +480,18 @@ func Select3[T1, T2, T3 any](
 	blocking bool) uint64 {
 
 	i := primitive.RandomUint64() % uint64(3)
-	if TrySelectCase3(i, case1, case2, case3) {
+	if TrySelectCase3(i, case1, case2, case3, blocking) {
 		return i
 	}
 
 	for {
-		if TrySelect(case1) {
+		if TrySelect(case1, blocking) {
 			return 0
 		}
-		if TrySelect(case2) {
+		if TrySelect(case2, blocking) {
 			return 1
 		}
-		if TrySelect(case3) {
+		if TrySelect(case3, blocking) {
 			return 2
 		}
 		if !blocking {
@@ -504,18 +505,18 @@ func TrySelectCase4[T1, T2, T3, T4 any](
 	case1 *SelectCase[T1],
 	case2 *SelectCase[T2],
 	case3 *SelectCase[T3],
-	case4 *SelectCase[T4]) bool {
+	case4 *SelectCase[T4], blocking bool) bool {
 	if index == 0 {
-		return TrySelect(case1)
+		return TrySelect(case1, blocking)
 	}
 	if index == 1 {
-		return TrySelect(case2)
+		return TrySelect(case2, blocking)
 	}
 	if index == 2 {
-		return TrySelect(case3)
+		return TrySelect(case3, blocking)
 	}
 	if index == 3 {
-		return TrySelect(case4)
+		return TrySelect(case4, blocking)
 	}
 	panic("index needs to be 0, 1, 2 or 3")
 }
@@ -528,21 +529,21 @@ func Select4[T1, T2, T3, T4 any](
 	blocking bool) uint64 {
 
 	i := primitive.RandomUint64() % uint64(4)
-	if TrySelectCase4(i, case1, case2, case3, case4) {
+	if TrySelectCase4(i, case1, case2, case3, case4, blocking) {
 		return i
 	}
 
 	for {
-		if TrySelect(case1) {
+		if TrySelect(case1, blocking) {
 			return 0
 		}
-		if TrySelect(case2) {
+		if TrySelect(case2, blocking) {
 			return 1
 		}
-		if TrySelect(case3) {
+		if TrySelect(case3, blocking) {
 			return 2
 		}
-		if TrySelect(case4) {
+		if TrySelect(case4, blocking) {
 			return 3
 		}
 		if !blocking {
@@ -557,21 +558,21 @@ func TrySelectCase5[T1, T2, T3, T4, T5 any](
 	case2 *SelectCase[T2],
 	case3 *SelectCase[T3],
 	case4 *SelectCase[T4],
-	case5 *SelectCase[T5]) bool {
+	case5 *SelectCase[T5], blocking bool) bool {
 	if index == 0 {
-		return TrySelect(case1)
+		return TrySelect(case1, blocking)
 	}
 	if index == 1 {
-		return TrySelect(case2)
+		return TrySelect(case2, blocking)
 	}
 	if index == 2 {
-		return TrySelect(case3)
+		return TrySelect(case3, blocking)
 	}
 	if index == 3 {
-		return TrySelect(case4)
+		return TrySelect(case4, blocking)
 	}
 	if index == 4 {
-		return TrySelect(case5)
+		return TrySelect(case5, blocking)
 	}
 	panic("index needs to be 0, 1, 2, 3 or 4")
 }
@@ -585,24 +586,24 @@ func Select5[T1, T2, T3, T4, T5 any](
 	blocking bool) uint64 {
 
 	i := primitive.RandomUint64() % uint64(5)
-	if TrySelectCase5(i, case1, case2, case3, case4, case5) {
+	if TrySelectCase5(i, case1, case2, case3, case4, case5, blocking) {
 		return i
 	}
 
 	for {
-		if TrySelect(case1) {
+		if TrySelect(case1, blocking) {
 			return 0
 		}
-		if TrySelect(case2) {
+		if TrySelect(case2, blocking) {
 			return 1
 		}
-		if TrySelect(case3) {
+		if TrySelect(case3, blocking) {
 			return 2
 		}
-		if TrySelect(case4) {
+		if TrySelect(case4, blocking) {
 			return 3
 		}
-		if TrySelect(case5) {
+		if TrySelect(case5, blocking) {
 			return 4
 		}
 		if !blocking {
