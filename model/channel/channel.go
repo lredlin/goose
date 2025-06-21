@@ -212,6 +212,10 @@ func (c *Channel[T]) UnbufferedTryReceive(blocking bool) (bool, T, bool) {
 
 // Non-blocking receive function used for select statements. Blocking receive is modeled as
 // a single blocking select statement which amounts to a for loop until selected.
+// The blocking parameter here is used to determine whether or not we will make an offer to a
+// waiting sender. If true, we will make an offer since blocking receive is modeled as a for loop
+// around nonblocking TryReceive. If false, we don't make an offer since we don't need to match
+// with another non-blocking send.
 func (c *Channel[T]) TryReceive(blocking bool) (bool, T, bool) {
 	if uint64(len(c.buffer)) > 0 {
 		return c.BufferedTryReceive()
@@ -239,7 +243,7 @@ func (c *Channel[T]) SenderCompleteOrOffer(val T, blocking bool) SenderState {
 		return SenderCompletedWithReceiver
 	}
 	// No exchange in progress, make an offer.
-	// If we aren't blocking, don't make an offer, we aren't immediately selectable.
+	// Make an offer only if blocking.
 	if c.state == start && blocking {
 		c.state = sender_ready
 		// Save the value in case the receiver completes the exchange.

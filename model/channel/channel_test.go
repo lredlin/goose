@@ -1330,7 +1330,7 @@ func Test2NBSelectNoProgress(t *testing.T) {
 	doneRecv := make(chan struct{})
 	go func() {
 		for {
-			selected := channel.Select1(case_1 /*blocking=*/, false)
+			selected := channel.Select1(case_1, false)
 			if selected {
 				break
 			}
@@ -1342,7 +1342,7 @@ func Test2NBSelectNoProgress(t *testing.T) {
 	doneSend := make(chan struct{})
 	go func() {
 		for {
-			selected := channel.Select1(case_2 /*blocking=*/, false)
+			selected := channel.Select1(case_2, false)
 			if selected {
 				break
 			}
