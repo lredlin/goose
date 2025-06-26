@@ -1222,7 +1222,7 @@ func (ctx *Ctx) nilExpr(e *ast.Ident) glang.Expr {
 	}
 }
 
-func (ctx *Ctx) unaryExpr(e *ast.UnaryExpr, isSpecial bool) glang.Expr {
+func (ctx *Ctx) unaryExpr(e *ast.UnaryExpr, multipleBindings bool) glang.Expr {
 	if e.Op == token.NOT {
 		return glang.NotExpr{X: ctx.expr(e.X)}
 	}
@@ -1253,7 +1253,7 @@ func (ctx *Ctx) unaryExpr(e *ast.UnaryExpr, isSpecial bool) glang.Expr {
 	}
 	if e.Op == token.ARROW {
 		var expr glang.Expr = glang.NewCallExpr(glang.GallinaIdent("chan.receive"), ctx.expr(e.X))
-		if !isSpecial {
+		if !multipleBindings {
 			expr = glang.NewCallExpr(glang.GallinaIdent("Fst"), expr)
 		}
 		return expr
@@ -1404,11 +1404,11 @@ func (ctx *Ctx) builtinIdent(e *ast.Ident) glang.Expr {
 	return nil
 }
 
-func (ctx *Ctx) identExpr(e *ast.Ident, isSpecial bool) glang.Expr {
+func (ctx *Ctx) identExpr(e *ast.Ident, multipleBindings bool) glang.Expr {
 	// XXX: special case for a manually constructed Ident from select recv clause
 	if len(e.Name) > 0 && e.Name[0] == '$' {
 		var expr glang.Expr = glang.IdentExpr(e.Name)
-		if !isSpecial {
+		if !multipleBindings {
 			expr = glang.NewCallExpr(glang.GallinaIdent("Fst"), expr)
 		}
 		return expr
@@ -1436,7 +1436,7 @@ func (ctx *Ctx) identExpr(e *ast.Ident, isSpecial bool) glang.Expr {
 	panic("")
 }
 
-func (ctx *Ctx) indexExpr(e *ast.IndexExpr, isSpecial bool) glang.Expr {
+func (ctx *Ctx) indexExpr(e *ast.IndexExpr, multipleBindings bool) glang.Expr {
 	xTy := ctx.typeOf(e.X).Underlying()
 	switch xTy := xTy.(type) {
 	case *types.Map:
@@ -1445,7 +1445,7 @@ func (ctx *Ctx) indexExpr(e *ast.IndexExpr, isSpecial bool) glang.Expr {
 			ctx.expr(e.Index))
 		// FIXME: this is non-local. Should decide whether to do "Fst" based on
 		// assign statement or parent expression.
-		if !isSpecial {
+		if !multipleBindings {
 			e = glang.NewCallExpr(glang.GallinaIdent("Fst"), e)
 		}
 		return e
@@ -1575,12 +1575,24 @@ func (ctx *Ctx) funcLit(e *ast.FuncLit) glang.FuncLit {
 	return fl
 }
 
-func (ctx *Ctx) exprSpecial(e ast.Expr, isSpecial bool) glang.Expr {
+func (ctx *Ctx) typeAssertExpr(e *ast.TypeAssertExpr, multipleBindings bool) glang.Expr {
+	ty := ctx.typeOf(e.Type)
+	typeIdent := ctx.typeIdentity(e, ty)
+	if multipleBindings {
+		return glang.NewCallExpr(glang.GallinaIdent("interface.checked_type_assert"),
+			ctx.glangType(e.Type, ty),
+			ctx.expr(e.X),
+			typeIdent)
+	}
+	return glang.NewCallExpr(glang.GallinaIdent("interface.type_assert"), ctx.expr(e.X), typeIdent)
+}
+
+func (ctx *Ctx) exprSpecial(e ast.Expr, multipleBindings bool) glang.Expr {
 	switch e := e.(type) {
 	case *ast.CallExpr:
 		return ctx.callExpr(e)
 	case *ast.Ident:
-		return ctx.identExpr(e, isSpecial)
+		return ctx.identExpr(e, multipleBindings)
 	case *ast.SelectorExpr:
 		return ctx.selectorExpr(e)
 	case *ast.CompositeLit:
@@ -1593,18 +1605,17 @@ func (ctx *Ctx) exprSpecial(e ast.Expr, isSpecial bool) glang.Expr {
 	case *ast.SliceExpr:
 		return ctx.sliceExpr(e)
 	case *ast.IndexExpr:
-		return ctx.indexExpr(e, isSpecial)
+		return ctx.indexExpr(e, multipleBindings)
 	case *ast.IndexListExpr:
 		return ctx.indexListExpr(e)
 	case *ast.UnaryExpr:
-		return ctx.unaryExpr(e, isSpecial)
+		return ctx.unaryExpr(e, multipleBindings)
 	case *ast.ParenExpr:
 		return ctx.expr(e.X)
 	case *ast.StarExpr:
 		return ctx.derefExpr(e.X)
 	case *ast.TypeAssertExpr:
-		// TODO: do something with the type
-		return ctx.expr(e.X)
+		return ctx.typeAssertExpr(e, multipleBindings)
 	case *ast.FuncLit:
 		return ctx.funcLit(e)
 	default:
@@ -1977,6 +1988,42 @@ func isIntegerKind(t types.BasicKind) bool {
 	return isUnsignedIntegerKind(t) || isSignedIntegerKind(t)
 }
 
+// typeIdentity gives the string-based representation of a type, used for
+// interface values and type assertions.
+//
+// To be fully accurate to Go's type-comparison semantics, this should mimic
+// Go's internal (*types.Type).LinkString():
+// https://github.com/golang/go/blob/b5d555991ab73e06e09741952a66dd7eeaf2a185/src/cmd/compile/internal/types/fmt.go#L220-L227.
+func (ctx *Ctx) typeIdentity(n locatable, from types.Type) glang.Expr {
+	maybePtrSuffix := ""
+	if fromPointer, ok := from.(*types.Pointer); ok {
+		from = fromPointer.Elem()
+		maybePtrSuffix = "'ptr"
+	}
+	if fromNamed, ok := from.(*types.Named); ok {
+		pkgName, typeName := ctx.getPkgAndName(fromNamed.Obj())
+		// TODO: is this ever needed?
+		if ctx.pkgIdent == pkgName {
+			ctx.dep.Add(typeName)
+		}
+		return glang.TupleExpr([]glang.Expr{
+			glang.StringVal{Value: glang.GallinaIdent(pkgName)},
+			glang.StringVal{Value: glang.GallinaString(typeName + maybePtrSuffix)},
+		})
+	} else if fromBasic, ok := from.(*types.Basic); ok {
+		typeName := fromBasic.Name() + maybePtrSuffix
+		return glang.TupleExpr([]glang.Expr{glang.NewStringVal(""), glang.NewStringVal(typeName)})
+	} else if _, ok := from.(*types.Slice); ok {
+		typeName := "slice" + maybePtrSuffix
+		return glang.TupleExpr([]glang.Expr{glang.NewStringVal(""), glang.NewStringVal(typeName)})
+	} else if _, ok := from.(*types.Map); ok {
+		typeName := "map" + maybePtrSuffix
+		return glang.TupleExpr([]glang.Expr{glang.NewStringVal(""), glang.NewStringVal(typeName)})
+	}
+	ctx.unsupported(n, "unsupported type for interface representation: %v", from)
+	panic("unreachable")
+}
+
 // This handles conversions arising from the notion of "assignability" in the Go spec.
 func (ctx *Ctx) handleImplicitConversion(n locatable, from, to types.Type, e glang.Expr) glang.Expr {
 	if to == nil {
@@ -2034,36 +2081,8 @@ func (ctx *Ctx) handleImplicitConversion(n locatable, from, to types.Type, e gla
 			// independent of the particular interface type.
 			return e
 		}
-
-		maybePtrSuffix := ""
-		if fromPointer, ok := from.(*types.Pointer); ok {
-			from = fromPointer.Elem()
-			maybePtrSuffix = "'ptr"
-		}
-		if fromNamed, ok := from.(*types.Named); ok {
-			pkgName, typeName := ctx.getPkgAndName(fromNamed.Obj())
-			ctx.dep.Add(typeName)
-			return glang.NewCallExpr(glang.GallinaIdent("interface.make"),
-				glang.StringVal{Value: glang.GallinaIdent(pkgName)},
-				glang.StringVal{Value: glang.GallinaString(typeName + maybePtrSuffix)},
-				e)
-		} else if fromBasic, ok := from.(*types.Basic); ok {
-			typeName := fromBasic.Name() + maybePtrSuffix
-			ctx.dep.Add(typeName)
-			return glang.NewCallExpr(glang.GallinaIdent("interface.make"),
-				glang.StringVal{Value: glang.StringLiteral{Value: ""}},
-				glang.StringVal{Value: glang.StringLiteral{Value: typeName}},
-				e,
-			)
-		} else if _, ok := from.(*types.Slice); ok {
-			typeName := "slice'" + maybePtrSuffix
-			ctx.dep.Add(typeName)
-			return glang.NewCallExpr(glang.GallinaIdent("interface.make"), glang.StringVal{Value: glang.StringLiteral{Value: typeName}}, e)
-		} else if _, ok := from.(*types.Map); ok {
-			typeName := "map'" + maybePtrSuffix
-			ctx.dep.Add(typeName)
-			return glang.NewCallExpr(glang.GallinaIdent("interface.make"), glang.StringVal{Value: glang.StringLiteral{Value: typeName}}, e)
-		}
+		typeIdent := ctx.typeIdentity(n, from)
+		return glang.NewCallExpr(glang.GallinaIdent("interface.make"), typeIdent, e)
 	}
 
 	if fromBasic, ok := fromUnder.(*types.Basic); ok && fromBasic.Kind() == types.UntypedBool {
