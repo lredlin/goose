@@ -25,3 +25,7 @@ func UseAddWithLiteral() uint64 {
 	r := Point{x: 2, y: 3}.Add(4)
 	return r
 }
+
+func (Point) IgnoreReceiver() string {
+	return "ok"
+}
