@@ -35,6 +35,16 @@ func fancyTypeSwitch(x any) int {
 		r = z
 	case string:
 		return 2
+	case nil:
+		return 4
 	}
 	return r
+}
+
+func multiTypeSwitch(x any) int {
+	switch x.(type) {
+	case int, string:
+		return 1
+	}
+	return 0
 }
