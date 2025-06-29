@@ -2693,7 +2693,11 @@ func (ctx *Ctx) funcDecl(d *ast.FuncDecl) []glang.Decl {
 		}
 
 		ctx.dep.SetCurrentName(fd.Name)
-		fd.RecvArg = &glang.Binder{Name: receiver.Names[0].Name}
+		name := "_"
+		if len(receiver.Names) > 0 {
+			name = receiver.Names[0].Name
+		}
+		fd.RecvArg = &glang.Binder{Name: name}
 	} else {
 		switch ctx.filter.GetAction(funcName) {
 		case declfilter.Skip:
