@@ -1666,26 +1666,19 @@ func (ctx *Ctx) switchStmt(s *ast.SwitchStmt, cont glang.Expr) (e glang.Expr) {
 			continue
 		}
 
-		t := ctx.typeOf(c.List[0])
-		eqType := ctx.typeJoin(c.List[0], t, tagType)
-		cond := glang.BinaryExpr{
-			X:  ctx.handleImplicitConversion(c.List[0], tagType, eqType, glang.IdentExpr("$sw")),
-			Op: glang.OpEquals,
-			Y:  ctx.handleImplicitConversion(c.List[0], t, eqType, ctx.expr(c.List[0])),
+		getCond := func(i int) glang.Expr {
+			t := ctx.typeOf(c.List[i])
+			eqType := ctx.typeJoin(c.List[i], t, tagType)
+			return glang.BinaryExpr{
+				X:  ctx.handleImplicitConversion(c.List[i], tagType, eqType, glang.IdentExpr("$sw")),
+				Op: glang.OpEquals,
+				Y:  ctx.handleImplicitConversion(c.List[i], t, eqType, ctx.expr(c.List[i])),
+			}
 		}
 
-		for _, y := range c.List[1:] {
-			t := ctx.typeOf(y)
-			eqType := ctx.typeJoin(y, t, tagType)
-			cond = glang.BinaryExpr{
-				Op: glang.OpLOr,
-				X: glang.BinaryExpr{
-					X:  ctx.handleImplicitConversion(y, tagType, eqType, glang.IdentExpr("$sw")),
-					Op: glang.OpEquals,
-					Y:  ctx.handleImplicitConversion(y, t, eqType, ctx.expr(y)),
-				},
-				Y: cond,
-			}
+		cond := getCond(0)
+		for i := 1; i < len(c.List); i++ {
+			cond = glang.BinaryExpr{Op: glang.OpLOr, X: getCond(i), Y: cond}
 		}
 
 		e = glang.IfExpr{
@@ -2540,34 +2533,77 @@ func (ctx *Ctx) typeSwitchStmt(s *ast.TypeSwitchStmt, cont glang.Expr) (e glang.
 			// default case already handled
 			continue
 		}
-		// the type being checked by this clause
-		ty := ctx.typeOf(c.List[0])
-		let := glang.LetExpr{
-			Names: []string{"$x_ok"},
-			ValExpr: glang.NewCallExpr(glang.GallinaIdent("interface.checked_type_assert"),
-				ctx.glangType(c.List[0], ty),
-				glang.IdentExpr("$y"),
-				ctx.typeIdentity(c.List[0], ty),
-			),
-			Cont: glang.IfExpr{
-				Cond: glang.NewCallExpr(glang.GallinaIdent("Snd"), glang.IdentExpr("$x_ok")),
-				Then: ctx.stmtList(c.Body, nil),
-				Else: e,
-			},
-		}
+
+		body := ctx.stmtList(c.Body, nil)
 		if x != nil {
 			// in switch x := y.(type), we create a mutable variable for x in
-			// each case, since its value is y coerced to the right type for
-			// that case
-			let.Cont = glang.LetExpr{
+			// each case's body, since its value is y coerced to the right type
+			// for that case
+			body = glang.LetExpr{
 				Names: []string{x.Name},
 				ValExpr: glang.RefExpr{
-					X: glang.NewCallExpr(glang.GallinaIdent("Fst"), glang.IdentExpr("$x_ok")),
+					X: glang.IdentExpr("$x"),
 				},
-				Cont: let.Cont,
+				Cont: body,
 			}
 		}
-		e = let
+
+		e = glang.IfExpr{Cond: glang.IdentExpr("$ok"), Then: body, Else: e}
+
+		if len(c.List) > 1 {
+			// In this case, the x actually has the same type as y (i.e. x is just y).
+			e = glang.LetExpr{Names: []string{"$x"}, ValExpr: glang.IdentExpr("$y"), Cont: e}
+
+			// The case is taken if y can be converted to any of the types
+			getCond := func(i int) glang.Expr {
+				ty := ctx.typeOf(c.List[i])
+				if b, ok := ty.(*types.Basic); ok && b.Kind() == types.UntypedNil {
+					return glang.NewCallExpr(
+						glang.GallinaIdent("interface.eq"),
+						glang.IdentExpr("$y"),
+						glang.GallinaIdent("#interface.nil"),
+					)
+				} else {
+					return glang.NewCallExpr(glang.GallinaIdent("Snd"),
+						glang.NewCallExpr(glang.GallinaIdent("interface.checked_type_assert"),
+							ctx.glangType(c.List[i], ty),
+							glang.IdentExpr("$y"),
+							ctx.typeIdentity(c.List[i], ty),
+						),
+					)
+				}
+			}
+			cond := getCond(0)
+			for i := range c.List[1:] {
+				cond = glang.BinaryExpr{Op: glang.OpLOr, X: getCond(i), Y: cond}
+			}
+			e = glang.LetExpr{Names: []string{"$ok"}, ValExpr: cond, Cont: e}
+		} else {
+			// In this case, x should have the type equal to the single type listed in this case.
+			ty := ctx.typeOf(c.List[0])
+			if b, ok := ty.(*types.Basic); ok && b.Kind() == types.UntypedNil {
+				e = glang.LetExpr{Names: []string{"$x"}, ValExpr: glang.IdentExpr("$y"), Cont: e}
+				e = glang.LetExpr{
+					Names: []string{"$ok"},
+					ValExpr: glang.NewCallExpr(
+						glang.GallinaIdent("interface.eq"),
+						glang.IdentExpr("$y"),
+						glang.GallinaIdent("#interface.nil"),
+					),
+					Cont: e,
+				}
+			} else {
+				e = glang.LetExpr{
+					Names: []string{"$x", "$ok"},
+					ValExpr: glang.NewCallExpr(glang.GallinaIdent("interface.checked_type_assert"),
+						ctx.glangType(c.List[0], ty),
+						glang.IdentExpr("$y"),
+						ctx.typeIdentity(c.List[0], ty),
+					),
+					Cont: e,
+				}
+			}
+		}
 	}
 	if s.Init != nil {
 		e = glang.ParenExpr{Inner: ctx.stmt(s.Init, e)}
