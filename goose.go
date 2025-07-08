@@ -2875,7 +2875,7 @@ func (ctx *Ctx) declType(t types.Type) glang.Expr {
 }
 
 // constSpec handles one specification in a const block
-func (ctx *Ctx) constSpec(spec *ast.ValueSpec, canTranslateExpr bool) []glang.Decl {
+func (ctx *Ctx) constSpec(spec *ast.ValueSpec) []glang.Decl {
 	var cds []glang.Decl
 	// Note that a spec is one line, typically something like `C = 1` or maybe just C
 	// if using iota, and spec.Names has more than 1 item only for something like
@@ -2895,17 +2895,8 @@ func (ctx *Ctx) constSpec(spec *ast.ValueSpec, canTranslateExpr bool) []glang.De
 			if i == 0 {
 				addSourceDoc(spec.Comment, &cd.Comment)
 			}
-			var fromT types.Type
-			var v glang.Expr
-			if len(spec.Values) > 0 && canTranslateExpr {
-				fromT, v = ctx.typeOf(spec.Values[i]), ctx.expr(spec.Values[i])
-			} else {
-				fromT, v = ctx.constantLiteral(spec.Names[i], ctx.info.ObjectOf(spec.Names[i]).(*types.Const).Val())
-			}
-			cd.Val =
-				ctx.handleImplicitConversion(spec.Names[i],
-					fromT, ctx.typeOf(spec.Names[i]),
-					v)
+			fromT, v := ctx.constantLiteral(spec.Names[i], ctx.info.ObjectOf(spec.Names[i]).(*types.Const).Val())
+			cd.Val = ctx.handleImplicitConversion(spec.Names[i], fromT, ctx.typeOf(spec.Names[i]), v)
 			cd.Type = ctx.declType(ctx.typeOf(spec.Names[i]))
 			cds = append(cds, cd)
 			ctx.dep.UnsetCurrentName()
@@ -2916,14 +2907,9 @@ func (ctx *Ctx) constSpec(spec *ast.ValueSpec, canTranslateExpr bool) []glang.De
 
 func (ctx *Ctx) constDecl(d *ast.GenDecl) []glang.Decl {
 	var specs []glang.Decl
-	for i, spec := range d.Specs {
+	for _, spec := range d.Specs {
 		spec := spec.(*ast.ValueSpec)
-		// If the next spec has no val, then don't try to translate the RHS expr
-		// because it'll have ast nodes that were overwritten in ctx.info.Types.
-		// (The next constSpec's values overwrote the value in info.Types for
-		// the RHS expr during type checking).
-		canTranslateExpr := !(i+1 < len(d.Specs) && len(d.Specs[i+1].(*ast.ValueSpec).Values) == 0)
-		specs = append(specs, ctx.constSpec(spec, canTranslateExpr)...)
+		specs = append(specs, ctx.constSpec(spec)...)
 	}
 	return specs
 }
