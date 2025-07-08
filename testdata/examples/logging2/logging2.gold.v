@@ -17,7 +17,7 @@ Definition LOGSTART : expr := #(W64 1).
 
 Definition LOGMAXBLK : expr := #(W64 510).
 
-Definition LOGEND : expr := LOGMAXBLK + LOGSTART.
+Definition LOGEND : expr := #(W64 511).
 
 Definition Log : go_type := structT [
   "logLock" :: ptrT;
