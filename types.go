@@ -62,11 +62,15 @@ func TypeIsGooseLang(t types.Type) bool {
 func (ctx *Ctx) typeDecl(spec *ast.TypeSpec) []glang.Decl {
 	switch ctx.filter.GetAction(spec.Name.Name) {
 	case declfilter.Axiomatize:
-		// TODO: need to remember this is axiomatized as a go_type
-		return []glang.Decl{glang.AxiomDecl{
-			DeclName: spec.Name.Name,
-			Type:     glang.GallinaIdent("go_type"),
-		}}
+		if t, ok := ctx.typeOf(spec.Name).(*types.Named); ok {
+			ctx.namedTypes = append(ctx.namedTypes, t)
+			return []glang.Decl{glang.AxiomDecl{
+				DeclName: spec.Name.Name,
+				Type:     glang.GallinaIdent("go_type"),
+			}}
+		}
+		ctx.unsupported(spec, "axiomatized type should be a named type")
+		return nil
 	case declfilter.Trust:
 		if t, ok := ctx.typeOf(spec.Name).(*types.Named); ok {
 			if _, ok := t.Underlying().(*types.Interface); !ok {

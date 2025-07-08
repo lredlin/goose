@@ -2718,7 +2718,6 @@ func (ctx *Ctx) funcDecl(d *ast.FuncDecl) []glang.Decl {
 		case declfilter.Trust:
 			return nil
 		case declfilter.Axiomatize:
-			ctx.functions = append(ctx.functions, glang.TypeMethod(typeName, d.Name.Name))
 			return []glang.Decl{glang.AxiomDecl{DeclName: fd.Name, Type: glang.GallinaIdent("val")}}
 		}
 
