@@ -2722,6 +2722,7 @@ func (ctx *Ctx) funcDecl(d *ast.FuncDecl) []glang.Decl {
 		}
 
 		ctx.dep.SetCurrentName(fd.Name)
+		defer ctx.dep.UnsetCurrentName()
 		name := "_"
 		if len(receiver.Names) > 0 {
 			name = receiver.Names[0].Name
@@ -2740,8 +2741,8 @@ func (ctx *Ctx) funcDecl(d *ast.FuncDecl) []glang.Decl {
 		}
 
 		ctx.dep.SetCurrentName(fd.Name)
+		defer ctx.dep.UnsetCurrentName()
 	}
-	defer ctx.dep.UnsetCurrentName()
 
 	if d.Type.TypeParams != nil {
 		for _, p := range d.Type.TypeParams.List {
@@ -2887,19 +2888,21 @@ func (ctx *Ctx) constSpec(spec *ast.ValueSpec) []glang.Decl {
 				Type: ctx.declType(ctx.typeOf(spec.Names[i])),
 			})
 		case declfilter.Translate:
-			cd := glang.ConstDecl{
-				Name: spec.Names[i].Name,
-			}
-			ctx.dep.SetCurrentName(cd.Name)
-			// copy the line comment only to the first one
-			if i == 0 {
-				addSourceDoc(spec.Comment, &cd.Comment)
-			}
-			fromT, v := ctx.constantLiteral(spec.Names[i], ctx.info.ObjectOf(spec.Names[i]).(*types.Const).Val())
-			cd.Val = ctx.handleImplicitConversion(spec.Names[i], fromT, ctx.typeOf(spec.Names[i]), v)
-			cd.Type = ctx.declType(ctx.typeOf(spec.Names[i]))
-			cds = append(cds, cd)
-			ctx.dep.UnsetCurrentName()
+			func() {
+				cd := glang.ConstDecl{
+					Name: spec.Names[i].Name,
+				}
+				ctx.dep.SetCurrentName(cd.Name)
+				defer ctx.dep.UnsetCurrentName()
+				// copy the line comment only to the first one
+				if i == 0 {
+					addSourceDoc(spec.Comment, &cd.Comment)
+				}
+				fromT, v := ctx.constantLiteral(spec.Names[i], ctx.info.ObjectOf(spec.Names[i]).(*types.Const).Val())
+				cd.Val = ctx.handleImplicitConversion(spec.Names[i], fromT, ctx.typeOf(spec.Names[i]), v)
+				cd.Type = ctx.declType(ctx.typeOf(spec.Names[i]))
+				cds = append(cds, cd)
+			}()
 		}
 	}
 	return cds
@@ -3011,6 +3014,7 @@ func (ctx *Ctx) initFunctions() []glang.Decl {
 	var decls = []glang.Decl{}
 
 	ctx.dep.SetCurrentName("initialize'")
+	defer ctx.dep.UnsetCurrentName()
 	initFunc := glang.FuncDecl{Name: "initialize'"}
 
 	var globalVars glang.ListExpr
