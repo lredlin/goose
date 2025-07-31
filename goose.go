@@ -2221,7 +2221,7 @@ func (ctx *Ctx) assignOpStmt(s *ast.AssignStmt, cont glang.Expr) glang.Expr {
 		token.REM_ASSIGN: glang.OpRem,
 
 		token.AND_ASSIGN: glang.OpAnd,
-		token.OR_ASSIGN: glang.OpOr,
+		token.OR_ASSIGN:  glang.OpOr,
 		token.XOR_ASSIGN: glang.OpXor,
 		token.SHL_ASSIGN: glang.OpShl,
 		token.SHR_ASSIGN: glang.OpShr,
