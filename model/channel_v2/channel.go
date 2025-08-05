@@ -131,9 +131,8 @@ func (c *Channel[T]) BufferedTryReceiveLocked() (bool, T, bool) {
 	var v T
 	if len(c.buffer) > 0 {
 		val_copy := c.buffer[0]
-		c.v = &val_copy
 		c.buffer = c.buffer[1:]
-		return true, *c.v, true
+		return true, val_copy, true
 	}
 	if c.state == closed {
 		return true, v, false
@@ -173,7 +172,7 @@ func (c *Channel[T]) UnbufferedTryReceive(blocking bool) (bool, T, bool) {
 		return true, local_val, true
 	}
 
-	if c.state == idle {
+	if c.state == idle && blocking {
 		c.state = offer
 		c.lock.Unlock()
 		c.lock.Lock()
@@ -214,7 +213,7 @@ func (c *Channel[T]) UnbufferedTryReceive(blocking bool) (bool, T, bool) {
 // around nonblocking TryReceive. If false, we don't make an offer since we don't need to match
 // with another non-blocking send.
 func (c *Channel[T]) TryReceive(blocking bool) (bool, T, bool) {
-	if uint64(len(c.buffer)) > 0 {
+	if c.cap > 0 {
 		return c.BufferedTryReceive()
 	} else {
 		return c.UnbufferedTryReceive(blocking)
@@ -289,10 +288,9 @@ func (c *Channel[T]) BufferedTrySend(val T) bool {
 // Non-Blocking send operation for select statements. Blocking send and blocking select
 // statements simply call this in a for loop until it returns true.
 func (c *Channel[T]) TrySend(val T, blocking bool) bool {
-	var buffer_size uint64 = uint64(len(c.buffer))
 
 	// Buffered channel:
-	if buffer_size != 0 {
+	if c.cap != 0 {
 		c.lock.Lock()
 		sendResult := c.BufferedTrySend(val)
 		c.lock.Unlock()

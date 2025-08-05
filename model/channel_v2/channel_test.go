@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/goose-lang/goose/model/channel"
+	channel "github.com/goose-lang/goose/model/channel_v2"
 )
 
 // The channel tests below are for the Goose model of channels that is implemented as a Go
